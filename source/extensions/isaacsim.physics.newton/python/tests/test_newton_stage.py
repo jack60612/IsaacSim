@@ -655,7 +655,8 @@ class TestNewtonStagePicking(omni.kit.test.AsyncTestCase):
         for target_x in (0.5, -0.5):
             moved_origin = carb.Float3(target_x / meters_per_unit, -3.0 / meters_per_unit, 1.0 / meters_per_unit)
             interaction.handle_raycast(moved_origin, direction, True)
-            for _ in range(120):
+            # An off-center spring excites coupled rotation and translation; allow six simulated seconds to settle.
+            for _ in range(360):
                 stage.step_sim(1.0 / 60.0)
             position = stage.state_0.body_q.numpy()[body][:3]
             self.assertTrue(np.all(np.isfinite(position)))
