@@ -25,6 +25,7 @@ import omni.timeline
 import omni.usd
 import usdrt
 import warp as wp
+from newton.viewer import Picking
 from pxr import Usd, UsdGeom, UsdPhysics
 
 from . import carb_config
@@ -80,6 +81,8 @@ class NewtonStage:
 
     def init(self) -> None:
         """Reset simulation state to initial values."""
+        self.release_picking()
+        self.picking: Picking | None = None
         self.initialized = False
         self._initializing = False  # Reentrant guard
         self._init_failed = False
@@ -145,6 +148,7 @@ class NewtonStage:
             self.playing = True
         if e.type == int(omni.timeline.TimelineEventType.STOP):
             self.playing = False
+            self.release_picking()
             self.graph = None
             self._init_failed = False
             if carb_config.reset_on_stop():
@@ -153,9 +157,58 @@ class NewtonStage:
                 self._write_usd_state_on_stop()
         if e.type == int(omni.timeline.TimelineEventType.PAUSE):
             self.playing = False
+            self.release_picking()
             self.graph = None
         if e.type == int(omni.timeline.TimelineEventType.CURRENT_TIME_CHANGED):
             pass
+
+    def release_picking(self) -> None:
+        """Release the viewport drag without changing the captured physics graph."""
+        picking = getattr(self, "picking", None)
+        if picking is not None:
+            picking.release()
+
+    def handle_raycast(self, origin: carb.Float3 | None, direction: carb.Float3 | None, has_input: bool) -> bool:
+        """Pick or update a viewport drag using a ray in USD world coordinates.
+
+        Args:
+            origin: Ray origin in USD stage units.
+            direction: Ray direction, normalized before use.
+            has_input: Whether the drag input remains pressed; false releases the pick.
+
+        Returns:
+            Whether the input was handled by an initialized, playing stage, or released.
+        """
+        if not has_input:
+            self.release_picking()
+            return True
+        if not self.playing or not self.initialized or self.picking is None or self.state_0 is None:
+            self.release_picking()
+            return False
+        if origin is None or direction is None:
+            self.release_picking()
+            return False
+
+        ray_origin = tuple(float(origin[i]) for i in range(3))
+        ray_direction = tuple(float(direction[i]) for i in range(3))
+        direction_length = math.hypot(*ray_direction)
+        if (
+            not all(math.isfinite(value) for value in (*ray_origin, *ray_direction))
+            or not math.isfinite(direction_length)
+            or direction_length == 0.0
+        ):
+            self.release_picking()
+            return False
+
+        # Fabric multiplies Newton meters by `scene_scale` to produce USD coordinates.
+        # A direction is dimensionless; only the ray origin needs the inverse conversion.
+        ray_start = wp.vec3(*(value / self.scene_scale for value in ray_origin))
+        ray_dir = wp.vec3(*(value / direction_length for value in ray_direction))
+        if self.picking.is_picking():
+            self.picking.update(ray_start, ray_dir)
+        else:
+            self.picking.pick(self.state_0, ray_start, ray_dir)
+        return True
 
     def _write_usd_state_on_stop(self) -> None:
         """Preserve the final MuJoCo pose when reset-on-stop is disabled."""
@@ -393,6 +446,7 @@ class NewtonStage:
             stage_id: USD stage identifier.
             meters_per_unit: Scene scale in meters per unit.
         """
+        self.release_picking()
         if not hasattr(self, "device_str"):
             self.device = wp.get_device()
             self.device_str = str(self.device)
@@ -421,6 +475,7 @@ class NewtonStage:
         Args:
             path: Path of the changed prim.
         """
+        self.release_picking()
         self.initialized = False
 
     def update_fabric_attrs(self) -> None:
@@ -525,6 +580,10 @@ class NewtonStage:
 
     def _initialize_newton_impl(self) -> None:
         """Internal implementation of Newton initialization."""
+        self.release_picking()
+        self.picking = None
+        self.graph = None
+        self._kernels_compiled = False
         self._initializing = True
         wp.set_device(self.device)
 
@@ -741,6 +800,8 @@ class NewtonStage:
         self.qd_ik = self.model.joint_qd
         self.joint_torques = wp.zeros(self.model.joint_dof_count, dtype=wp.float32)
         self.solver = self._create_solver(self.model, self.cfg.solver_cfg)
+        # Allocate the picker before capture; its device-side pick state remains live in the graph.
+        self.picking = Picking(self.model, pick_max_acceleration=5.0)
 
         self.stage = usdrt_stage
         self.sim_time = 0.0
@@ -787,6 +848,9 @@ class NewtonStage:
         # back into the pinned buffer (the ``need_state_copy`` pattern of the Newton examples).
         pinned_state = self.state_0
         for _ in range(num_substeps):
+            # Always launch, including while inactive: captured graphs read the current pick state.
+            if self.picking is not None:
+                self.picking.apply_forces(self.state_0)
             self.solver.step(self.state_0, self.state_1, self.control, contacts, step_dt / float(num_substeps))  # type: ignore[has-type]
             self.state_0, self.state_1 = self.state_1, self.state_0
             self.state_0.clear_forces()

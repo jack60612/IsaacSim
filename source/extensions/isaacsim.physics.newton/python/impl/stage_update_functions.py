@@ -135,6 +135,7 @@ class NewtonStageUpdateFunctions:
         try:
             self.is_paused_state = True
             self.newton_stage.playing = False
+            self.newton_stage.release_picking()
             self.newton_stage.graph = None
             return True
         except Exception as e:
@@ -151,6 +152,7 @@ class NewtonStageUpdateFunctions:
             self.update_count = 0
             self.is_paused_state = False
             self.newton_stage.playing = False
+            self.newton_stage.release_picking()
             self.newton_stage.sim_time = 0.0  # type: ignore[assignment]
             if carb_config.reset_on_stop():
                 self.newton_stage.init()
@@ -170,6 +172,7 @@ class NewtonStageUpdateFunctions:
             True if the request was accepted.
         """
         try:
+            self.newton_stage.release_picking()
             self.newton_stage.initialized = False
             self.is_physics_loaded = False
             return True
@@ -195,14 +198,19 @@ class NewtonStageUpdateFunctions:
         """Called when a raycast request is executed.
 
         Args:
-            origin: Start position of the raycast.
-            direction: Direction of the raycast.
-            has_input: Whether the input control is set or reset.
+            origin: Start position of the raycast in USD world units.
+            direction: Direction of the raycast (normalized by the stage).
+            has_input: Whether the drag input is pressed; false releases the pick.
 
         Returns:
             True if raycast was handled.
         """
-        return True
+        try:
+            return self.newton_stage.handle_raycast(origin, direction, has_input)
+        except Exception as e:
+            self.newton_stage.release_picking()
+            carb.log_error(f"[Newton] handle_raycast failed: {e}")
+            return False
 
     def reset_simulation(self) -> bool:
         """Called when a reset of physics simulation is requested.
