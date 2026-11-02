@@ -635,6 +635,21 @@ class TestNewtonStagePicking(omni.kit.test.AsyncTestCase):
             atol=1.0e-3,
         )
 
+    def _compute_picked_point(self, stage: NewtonStage, body: int) -> np.ndarray:
+        """Transform the picked material point using the current simulated body pose.
+
+        Args:
+            stage: The initialized Newton stage with an active pick.
+            body: The cube body index.
+
+        Returns:
+            The picked point in world-space meters.
+        """
+        pose = stage.state_0.body_q.numpy()[body]
+        local_point = stage.picking.pick_state.numpy()[0]["picked_point_local"]
+        transform = wp.transform(wp.vec3(*pose[:3]), wp.quat(*pose[3:]))
+        return np.array(wp.transform_point(transform, wp.vec3(*local_point)))
+
     async def _check_drag(self, num_substeps: int, use_cuda_graph: bool, meters_per_unit: float) -> None:
         """Check live target changes and release before and after graph capture.
 
@@ -655,15 +670,26 @@ class TestNewtonStagePicking(omni.kit.test.AsyncTestCase):
         for target_x in (0.5, -0.5):
             moved_origin = carb.Float3(target_x / meters_per_unit, -3.0 / meters_per_unit, 1.0 / meters_per_unit)
             interaction.handle_raycast(moved_origin, direction, True)
-            # An off-center spring excites coupled rotation and translation; allow six simulated seconds to settle.
+            pick_state = stage.picking.pick_state.numpy()[0]
+            target = pick_state["picking_target_world"].copy()
+            np.testing.assert_allclose(target, [target_x, -0.1, 1.0], atol=1.0e-4)
+            initial_distance = float(np.linalg.norm(self._compute_picked_point(stage, body) - target))
+            closest_distance = initial_distance
+            velocity = stage.state_0.body_qd.numpy()[body][:3].copy()
+            # The off-center spring can keep the body rotating; test attraction over the trajectory,
+            # not an equilibrium pose or a monotonic settling time.
             for _ in range(360):
                 stage.step_sim(1.0 / 60.0)
+                point = self._compute_picked_point(stage, body)
+                self.assertTrue(np.all(np.isfinite(point)))
+                closest_distance = min(closest_distance, float(np.linalg.norm(point - target)))
+                next_velocity = stage.state_0.body_qd.numpy()[body][:3]
+                self.assertTrue(np.all(np.isfinite(next_velocity)))
+                acceleration = float(np.linalg.norm(next_velocity - velocity)) * 60.0
+                self.assertLessEqual(acceleration, 5.0 * 9.81 * 1.01, "Drag exceeded its acceleration cap")
+                velocity = next_velocity.copy()
+            self.assertLess(closest_distance, initial_distance * 0.5, "Picked point must approach the moved target")
             position = stage.state_0.body_q.numpy()[body][:3]
-            self.assertTrue(np.all(np.isfinite(position)))
-            # Any point on the 0.2 m cube lies within its bounding-sphere radius of the center.
-            # Allow another 0.08 m for spring settling without assuming a fixed cube orientation.
-            target = np.array([target_x, -0.1, 1.0])
-            self.assertLess(float(np.linalg.norm(position - target)), math.sqrt(3.0) * 0.1 + 0.08)
             self.assertGreater(float(position[0]) * math.copysign(1.0, target_x), 0.25)
         # Release while the spring is accelerating, not after it has settled.
         moved_origin = carb.Float3(1.0 / meters_per_unit, -3.0 / meters_per_unit, 1.0 / meters_per_unit)
