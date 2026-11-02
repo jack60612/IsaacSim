@@ -667,12 +667,16 @@ class TestNewtonStagePicking(omni.kit.test.AsyncTestCase):
         origin = carb.Float3(0.0, -3.0 / meters_per_unit, 1.0 / meters_per_unit)
         interaction.handle_raycast(origin, direction, True)
         self.assertTrue(stage.picking.is_picking(), "Ray must select the dynamic cube")
+        previous_target = stage.picking.pick_state.numpy()[0]["picking_target_world"].copy()
         for target_x in (0.5, -0.5):
             moved_origin = carb.Float3(target_x / meters_per_unit, -3.0 / meters_per_unit, 1.0 / meters_per_unit)
+            ray_origin = np.array([target_x, -3.0, 1.0])
+            expected_target = ray_origin + np.array([0.0, 1.0, 0.0]) * np.linalg.norm(previous_target - ray_origin)
             interaction.handle_raycast(moved_origin, direction, True)
             pick_state = stage.picking.pick_state.numpy()[0]
             target = pick_state["picking_target_world"].copy()
-            np.testing.assert_allclose(target, [target_x, -0.1, 1.0], atol=1.0e-4)
+            np.testing.assert_allclose(target, expected_target, atol=1.0e-4)
+            previous_target = target.copy()
             initial_distance = float(np.linalg.norm(self._compute_picked_point(stage, body) - target))
             closest_distance = initial_distance
             velocity = stage.state_0.body_qd.numpy()[body][:3].copy()
