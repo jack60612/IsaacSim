@@ -23,16 +23,20 @@ import carb
 import numpy as np
 
 import omni.kit.test
+import omni.usd
 from isaacsim.physics.newton import (
     CollisionConfig,
     MuJoCoSolverConfig,
     NewtonStage,
     NewtonConfig,
     NewtonSolverOutputConfig,
+    acquire_physics_interface,
     configure_newton,
     get_newton_config,
+    switch_newton_solver,
 )
 from isaacsim.physics.newton.impl import carb_config
+from pxr import UsdGeom, UsdPhysics
 
 
 class TestNewtonConfig(omni.kit.test.AsyncTestCase):
@@ -91,9 +95,19 @@ class TestNewtonConfig(omni.kit.test.AsyncTestCase):
         )
         solver = MuJoCoSolverConfig(njmax=17, nconmax=11, use_mujoco_contacts=False, include_sites=False)
         configure_newton(NewtonConfig(solver_cfg=solver))
+        context = omni.usd.get_context()
+        await context.new_stage_async()
+        stage = context.get_stage()
+        UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+        scene = UsdPhysics.Scene.Define(stage, "/PhysicsScene")
+        self.assertTrue(switch_newton_solver("mujoco", scene.GetPrim()))
+        acquire_physics_interface().force_load_physics_from_usd("cpu")
         self.assertIs(get_newton_config().solver_cfg, solver)
         self.assertEqual(get_newton_config().solver_cfg.njmax, 17)
         self.assertFalse(get_newton_config().solver_cfg.use_mujoco_contacts)
+        self.assertEqual(get_newton_config().solver_cfg.nconmax, 11)
+        self.assertFalse(get_newton_config().solver_cfg.include_sites)
+        await context.close_stage_async()
 
     async def test_native_contact_output_capacity(self) -> None:
         # Exercise only the integration's buffer choice, without replacing the
