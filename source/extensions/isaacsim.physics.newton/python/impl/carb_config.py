@@ -17,6 +17,8 @@
 
 import carb
 
+from .solver_config import MuJoCoSolverConfig
+
 """ List of existing settings"""
 
 
@@ -31,3 +33,21 @@ def reset_on_stop() -> bool:
 
 """ List of newton settings"""
 # don't forget to register them
+
+
+def mujoco_solver_config() -> MuJoCoSolverConfig:
+    """Read default MuJoCo options from Kit's user/application configuration.
+
+    Explicit ``configure_newton()`` solver objects take precedence over these
+    defaults. ``autoSize`` maps the existing optional capacities to ``None``.
+    """
+    settings = carb.settings.get_settings()
+    path = "/exts/isaacsim.physics.newton/mujoco"
+    options = {}
+    for setting, field in (("useMujocoContacts", "use_mujoco_contacts"), ("includeSites", "include_sites")):
+        value = settings.get(f"{path}/{setting}")
+        if value is not None:
+            options[field] = value
+    if settings.get(f"{path}/autoSize"):
+        options.update(njmax=None, nconmax=None)
+    return MuJoCoSolverConfig(**options)

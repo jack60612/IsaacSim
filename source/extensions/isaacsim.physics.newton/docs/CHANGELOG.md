@@ -3,6 +3,7 @@
 ## [1.1.1] - 2026-10-02
 ### Added
 - Support viewport Shift+drag through Newton Picking with bounded forces, including CUDA graph replay and physics substeps.
+- Load default MuJoCo native-contact, site-export, and automatic-capacity choices from Kit application/user settings without a startup script; explicit runtime solver configurations retain precedence.
 
 ### Changed
 - `NewtonStage.state_temp` is no longer allocated and stays `None`.
@@ -10,6 +11,7 @@
 ### Fixed
 - `NewtonStage.simulate`: keep `state_0` on one buffer for any `num_substeps`, with or without CUDA graph capture. Even substep counts with the graph ran physics at (N-1)/N speed and dropped tensor-view writes; odd counts without it made tensor views read a stale state every other step.
 - `NewtonStage.step_sim`: recapture the CUDA graph when `num_substeps` changes on the live configuration; the old graph kept replaying the captured substep count.
+- Size automatically allocated native MuJoCo contact-output buffers from the solver's contact capacity before graph capture. Explicit collision-buffer capacities remain unchanged.
 
 ## [1.1.0] - 2026-09-30
 ### Changed
