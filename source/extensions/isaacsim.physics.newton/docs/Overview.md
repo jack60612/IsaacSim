@@ -71,6 +71,29 @@ The extension supports multiple solver backends through specialized configuratio
 
 **{class}`MuJoCoSolverConfig <isaacsim.physics.newton.MuJoCoSolverConfig>`** provides extensive configuration for the MuJoCo Warp solver backend, including constraint limits, solver type selection, integrator options, and actuator gear mappings. This solver can operate in pure MuJoCo CPU mode or utilize the mujoco_warp GPU acceleration.
 
+For ordinary Kit GUI launches, default MuJoCo choices can be persisted in a documented
+[Kit user configuration](https://docs.omniverse.nvidia.com/kit/docs/kit-manual/latest/guide/configuring.html#system-configs),
+such as `${shared_documents}/user.toml`:
+
+```toml
+[exts."isaacsim.physics.newton".mujoco]
+autoSize = true
+useMujocoContacts = true
+includeSites = true
+```
+
+These settings map to `MuJoCoSolverConfig(njmax=None, nconmax=None,
+use_mujoco_contacts=True, include_sites=True)`. Absent settings preserve the
+existing defaults. A solver configuration explicitly supplied through
+`configure_newton()` takes precedence. Physics timestep and physical solver
+options continue to come from the stage's native scene attributes.
+
+With native MuJoCo contacts, an automatic `CollisionConfig.rigid_contact_max`
+uses `SolverMuJoCo.get_max_contact_count()` before contact-buffer allocation and
+CUDA graph capture. An explicit collision capacity is not increased silently;
+the normal capacity error remains if it is insufficient.
+
+
 ## Integration
 
 The extension integrates with Isaac Sim's unified physics interface through **omni.physics**, allowing applications to switch between Newton and other physics engines seamlessly. The isaacsim.core.simulation_manager dependency provides coordination with the broader simulation workflow, while usdrt.scenegraph enables direct Fabric integration for high-performance scene graph access.

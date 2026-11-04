@@ -67,7 +67,7 @@
 
 - class MuJoCoSolverConfig(NewtonSolverConfig)
   - solver_type: Literal[mujoco]
-  - njmax: int
+  - njmax: int | None
   - nconmax: int | None
   - cone: Literal['pyramidal', 'elliptic'] | None
   - use_mujoco_cpu: bool

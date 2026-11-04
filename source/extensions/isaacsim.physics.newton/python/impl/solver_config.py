@@ -191,11 +191,11 @@ class MuJoCoSolverConfig(NewtonSolverConfig):
     solver_type: Literal["mujoco"] = "mujoco"
     """Type of solver to use: 'xpbd', 'mujoco', 'featherstone', 'semiImplicit', 'vbd'."""
 
-    njmax: int = 1200
-    """Number of constraints per environment (world)."""
+    njmax: int | None = 1200
+    """Number of constraints per environment (world), or None for native scene sizing."""
 
     nconmax: int | None = 200
-    """Number of contact points per environment (world)."""
+    """Number of contact points per environment (world), or None for native scene sizing."""
 
     cone: Literal["pyramidal", "elliptic"] | None = None
     """Contact friction cone override. If None, use the value authored on the physics scene."""

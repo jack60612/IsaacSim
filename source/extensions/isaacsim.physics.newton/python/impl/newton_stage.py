@@ -302,6 +302,16 @@ class NewtonStage:
                 mc_edge_clamp_min=h.mc_edge_clamp_min,
             )
 
+        rigid_contact_max = cc.rigid_contact_max
+        if (
+            rigid_contact_max is None
+            and isinstance(self.cfg.solver_cfg, MuJoCoSolverConfig)
+            and self.cfg.solver_cfg.use_mujoco_contacts
+            and not self.cfg.solver_cfg.use_mujoco_cpu
+        ):
+            # Native MuJoCo can reserve more slots than Newton's narrow phase.
+            # Size the shared output buffer before capture, not after a step.
+            rigid_contact_max = self.solver.get_max_contact_count()
         # CollisionPipeline builds the hydroelastic narrow phase whenever any
         # shape carries the HYDROELASTIC flag, independent of
         # sdf_hydroelastic_config. Honor a runtime opt-out by masking the flag
@@ -319,7 +329,7 @@ class NewtonStage:
         try:
             return newton.CollisionPipeline(
                 model,
-                rigid_contact_max=cc.rigid_contact_max,
+                rigid_contact_max=rigid_contact_max,
                 broad_phase=cc.broad_phase,
                 sdf_hydroelastic_config=sdf_cfg,
             )
@@ -607,7 +617,9 @@ class NewtonStage:
         if solver_type in newton_solver_to_solver_config:
             config_type = newton_solver_to_solver_config[solver_type]
             if not isinstance(self.cfg.solver_cfg, config_type):
-                self.cfg.solver_cfg = config_type()
+                self.cfg.solver_cfg = (
+                    carb_config.mujoco_solver_config() if solver_type == "mujoco" else config_type()
+                )
         self.cfg.solver_cfg.solver_type = solver_type
 
         if self.stage_id is None or self.stage_id < 0:
@@ -786,6 +798,14 @@ class NewtonStage:
             self.scene_scale,
             self.device,
         )
+        auto_native_contacts = (
+            solver_type == "mujoco"
+            and self.cfg.solver_cfg.use_mujoco_contacts
+            and not self.cfg.solver_cfg.use_mujoco_cpu
+            and self.cfg.collision_cfg.rigid_contact_max is None
+        )
+        if auto_native_contacts:
+            self.solver = self._create_solver(self.model, self.cfg.solver_cfg)
         # Copy over initial states after body_q has been synced with the usd stage
         self.collision_pipeline = self._build_collision_pipeline(self.model)
         self.contacts = self.collision_pipeline.contacts()
@@ -799,7 +819,8 @@ class NewtonStage:
         self.q_ik = self.model.joint_q
         self.qd_ik = self.model.joint_qd
         self.joint_torques = wp.zeros(self.model.joint_dof_count, dtype=wp.float32)
-        self.solver = self._create_solver(self.model, self.cfg.solver_cfg)
+        if not auto_native_contacts:
+            self.solver = self._create_solver(self.model, self.cfg.solver_cfg)
         # Allocate the picker before capture; its device-side pick state remains live in the graph.
         self.picking = Picking(self.model, pick_max_acceleration=5.0)
 

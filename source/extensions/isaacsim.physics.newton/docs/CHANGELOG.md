@@ -3,6 +3,10 @@
 ## [Unreleased]
 ### Added
 - Support viewport Shift+drag through Newton Picking with bounded forces, including CUDA graph replay and physics substeps.
+- Load default MuJoCo native-contact, site-export, and automatic-capacity choices from Kit application/user settings without a startup script; explicit runtime solver configurations retain precedence.
+
+### Fixed
+- Size automatically allocated native MuJoCo contact-output buffers from the solver's contact capacity before graph capture. Explicit collision-buffer capacities remain unchanged.
 
 ## [1.1.1] - 2026-10-02
 ### Changed
