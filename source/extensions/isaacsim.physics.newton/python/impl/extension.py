@@ -21,6 +21,7 @@ from typing import Any
 
 import carb
 import omni.ext
+import omni.kit.app
 from isaacsim.core.simulation_manager import SimulationManager
 from omni.physics.core import get_physics_interface, k_invalid_simulation_id
 
@@ -33,6 +34,7 @@ from .register_simulation import NewtonSimulationRegistry
 _newton_physics_interface = None
 _newton_stage = None
 _pending_newton_config: NewtonConfig | None = None
+_viewport_interaction = None
 
 
 def acquire_physics_interface() -> NewtonPhysicsInterface | None:
@@ -242,9 +244,37 @@ class NewtonSimExtension(omni.ext.IExt):
                 f"[isaacsim.physics.newton] Failed to register Newton (solver: {cfg.solver_cfg.solver_type})"
             )
 
+        # Optional runtime integration: do not require viewport/UI extensions in
+        # headless apps, and support viewports enabled after Newton starts.
+        self._viewport_hooks = omni.kit.app.get_app().get_extension_manager().subscribe_to_extension_enable(
+            on_enable_fn=self._enable_viewport_interaction,
+            on_disable_fn=self._disable_viewport_interaction,
+            ext_name="omni.kit.viewport.window",
+        )
+
+    def _enable_viewport_interaction(self, ext_id: str) -> None:
+        global _viewport_interaction
+
+        from .viewport_interaction import NewtonViewportInteraction
+
+        if _viewport_interaction is None:
+            _viewport_interaction = NewtonViewportInteraction(
+                lambda: get_active_physics_engine().lower() == "newton", _newton_stage.handle_raycast
+            )
+
+    def _disable_viewport_interaction(self, ext_id: str) -> None:
+        global _viewport_interaction
+
+        if _viewport_interaction is not None:
+            _viewport_interaction.destroy()
+            _viewport_interaction = None
+
     def on_shutdown(self) -> None:
         """Clean up resources when the extension is unloaded."""
         global _newton_stage
+
+        self._viewport_hooks = None
+        self._disable_viewport_interaction("")
 
         # Switch back to physx if we auto-switched to newton on startup
         success = SimulationManager.switch_physics_engine("physx")

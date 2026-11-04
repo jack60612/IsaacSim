@@ -13,21 +13,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Verify Newton simulation stage lifecycle behavior."""
+"""Verify Newton simulation stage lifecycle and viewport interaction behavior."""
 
+import copy
 import math
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import carb
+import isaacsim.core.experimental.utils.app as app_utils
+import isaacsim.physics.newton as newton_ext
 import newton
 import numpy as np
+import omni.kit.app
 import omni.kit.test
 import omni.timeline
 import omni.usd
 import warp as wp
+from isaacsim.core.simulation_manager import SimulationManager
+from isaacsim.physics.newton import configure_newton, get_newton_config
 from isaacsim.physics.newton.impl import carb_config
 from isaacsim.physics.newton.impl.newton_stage import NewtonStage
 from isaacsim.physics.newton.impl.solver_config import MuJoCoSolverConfig
+from isaacsim.physics.newton.impl.stage_update_functions import NewtonStageUpdateFunctions
 from isaacsim.physics.newton.impl.usd import UsdManager
 from isaacsim.physics.newton.impl.utils import newton_solver_to_api_schema
 from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics
@@ -531,3 +539,220 @@ class TestNewtonStagePhysicsSceneSelection(omni.kit.test.AsyncTestCase):
         newton_stage._get_physics_scene()
 
         self.assertIsNone(newton_stage.physics_scene_prim)
+
+
+class TestNewtonStagePicking(omni.kit.test.AsyncTestCase):
+    """Exercise viewport drag callbacks against a Newton USD rigid body."""
+
+    async def setUp(self) -> None:
+        """Create an empty stage and preserve the global Newton configuration."""
+        super().setUp()
+        self._saved_cfg = copy.deepcopy(get_newton_config())
+        await omni.usd.get_context().new_stage_async()
+        self.stage = omni.usd.get_context().get_stage()
+        UsdGeom.SetStageUpAxis(self.stage, UsdGeom.Tokens.z)
+
+    async def tearDown(self) -> None:
+        """Stop physics, restore configuration, and close the test stage."""
+        app_utils.stop()
+        await omni.kit.app.get_app().next_update_async()
+        if self._saved_cfg is not None:
+            configure_newton(self._saved_cfg)
+        await omni.usd.get_context().close_stage_async()
+        super().tearDown()
+
+    async def _play_cube(
+        self, num_substeps: int, use_cuda_graph: bool, meters_per_unit: float
+    ) -> tuple[NewtonStage, NewtonStageUpdateFunctions, int]:
+        """Play a one-kilogram, contact-free cube with zero gravity.
+
+        Args:
+            num_substeps: Solver substeps per frame.
+            use_cuda_graph: Whether to capture and replay physics on CUDA.
+            meters_per_unit: USD scene length unit in meters.
+
+        Returns:
+            The live stage, its interaction callbacks, and the cube body index.
+        """
+        if use_cuda_graph and not wp.get_device().is_cuda:
+            self.skipTest("CUDA graph capture requires a CUDA device")
+        UsdGeom.SetStageMetersPerUnit(self.stage, meters_per_unit)
+        scene = UsdPhysics.Scene.Define(self.stage, "/World/PhysicsScene")
+        scene.CreateGravityMagnitudeAttr(0.0)
+        SimulationManager.set_default_physics_scene("/World/PhysicsScene")
+        cube = UsdGeom.Cube.Define(self.stage, "/World/Cube")
+        cube.CreateSizeAttr(0.2 / meters_per_unit)
+        cube.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, 1.0 / meters_per_unit))
+        UsdPhysics.RigidBodyAPI.Apply(cube.GetPrim())
+        UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+        UsdPhysics.MassAPI.Apply(cube.GetPrim()).CreateMassAttr(1.0)
+        await omni.kit.app.get_app().next_update_async()
+
+        cfg = copy.deepcopy(get_newton_config())
+        cfg.solver_cfg = MuJoCoSolverConfig()
+        cfg.num_substeps = num_substeps
+        cfg.use_cuda_graph = use_cuda_graph
+        configure_newton(cfg)
+        app_utils.play()
+        stage = newton_ext.acquire_stage()
+        self.assertIsNotNone(stage)
+        for _ in range(60):
+            await omni.kit.app.get_app().next_update_async()
+            if stage.initialized and stage.model is not None:
+                break
+        self.assertTrue(stage.initialized, "Newton stage failed to initialize")
+        # Pause automatic updates; explicit stepping below owns all physics time.
+        app_utils.pause()
+        await omni.kit.app.get_app().next_update_async()
+        stage.playing = True
+        callbacks = NewtonStageUpdateFunctions(stage)
+        labels = [str(label) for label in stage.model.body_label]
+        body = next(i for i, label in enumerate(labels) if label.endswith("/World/Cube"))
+        np.testing.assert_allclose(stage.state_0.body_q.numpy()[body][:3], [0.0, 0.0, 1.0], atol=1.0e-4)
+        for _ in range(3):
+            stage.step_sim(1.0 / 60.0)
+        if use_cuda_graph:
+            self.assertIsNotNone(stage.graph, "Physics must be captured before the first pick")
+        return stage, callbacks, body
+
+    def _check_released_motion(self, stage: NewtonStage, body: int) -> None:
+        """Check that a released cube coasts without further picking acceleration.
+
+        Args:
+            stage: The initialized Newton stage.
+            body: The cube body index.
+        """
+        position = stage.state_0.body_q.numpy()[body][:3].copy()
+        velocity = stage.state_0.body_qd.numpy()[body][:3].copy()
+        frames = 20
+        for _ in range(frames):
+            stage.step_sim(1.0 / 60.0)
+        np.testing.assert_allclose(stage.state_0.body_qd.numpy()[body][:3], velocity, rtol=1.0e-4, atol=1.0e-4)
+        np.testing.assert_allclose(
+            stage.state_0.body_q.numpy()[body][:3],
+            position + velocity * (frames / 60.0),
+            rtol=1.0e-4,
+            atol=1.0e-3,
+        )
+
+    def _compute_picked_point(self, stage: NewtonStage, body: int) -> np.ndarray:
+        """Transform the picked material point using the current simulated body pose.
+
+        Args:
+            stage: The initialized Newton stage with an active pick.
+            body: The cube body index.
+
+        Returns:
+            The picked point in world-space meters.
+        """
+        pose = stage.state_0.body_q.numpy()[body]
+        local_point = stage.picking.pick_state.numpy()[0]["picked_point_local"]
+        transform = wp.transform(wp.vec3(*pose[:3]), wp.quat(*pose[3:]))
+        return np.array(wp.transform_point(transform, wp.vec3(*local_point)))
+
+    async def _check_drag(self, num_substeps: int, use_cuda_graph: bool, meters_per_unit: float) -> None:
+        """Check live target changes and release before and after graph capture.
+
+        Args:
+            num_substeps: Solver substeps per frame.
+            use_cuda_graph: Whether to capture physics on CUDA.
+            meters_per_unit: USD scene length unit in meters.
+        """
+        stage, interaction, body = await self._play_cube(num_substeps, use_cuda_graph, meters_per_unit)
+        # Exercise the Python callback boundary: native raycast bindings currently marshal rays as scalar floats.
+        captured_graph = stage.graph
+        # Move laterally in the initial view plane; the picked face point can rotate around the center of mass.
+        # Ray origins use USD units; directions need not be normalized.
+        direction = carb.Float3(0.0, 7.0, 0.0)
+        origin = carb.Float3(0.0, -3.0 / meters_per_unit, 1.0 / meters_per_unit)
+        interaction.handle_raycast(origin, direction, True)
+        self.assertTrue(stage.picking.is_picking(), "Ray must select the dynamic cube")
+        previous_target = stage.picking.pick_state.numpy()[0]["picking_target_world"].copy()
+        for target_x in (0.5, -0.5):
+            moved_origin = carb.Float3(target_x / meters_per_unit, -3.0 / meters_per_unit, 1.0 / meters_per_unit)
+            ray_origin = np.array([target_x, -3.0, 1.0])
+            expected_target = ray_origin + np.array([0.0, 1.0, 0.0]) * np.linalg.norm(previous_target - ray_origin)
+            interaction.handle_raycast(moved_origin, direction, True)
+            pick_state = stage.picking.pick_state.numpy()[0]
+            target = pick_state["picking_target_world"].copy()
+            np.testing.assert_allclose(target, expected_target, atol=1.0e-4)
+            previous_target = target.copy()
+            initial_distance = float(np.linalg.norm(self._compute_picked_point(stage, body) - target))
+            closest_distance = initial_distance
+            velocity = stage.state_0.body_qd.numpy()[body][:3].copy()
+            # The off-center spring can keep the body rotating; test attraction over the trajectory,
+            # not an equilibrium pose or a monotonic settling time.
+            for _ in range(360):
+                stage.step_sim(1.0 / 60.0)
+                point = self._compute_picked_point(stage, body)
+                self.assertTrue(np.all(np.isfinite(point)))
+                closest_distance = min(closest_distance, float(np.linalg.norm(point - target)))
+                next_velocity = stage.state_0.body_qd.numpy()[body][:3]
+                self.assertTrue(np.all(np.isfinite(next_velocity)))
+                acceleration = float(np.linalg.norm(next_velocity - velocity)) * 60.0
+                self.assertLessEqual(acceleration, 5.0 * 9.81 * 1.01, "Drag exceeded its acceleration cap")
+                velocity = next_velocity.copy()
+            self.assertLess(closest_distance, initial_distance * 0.5, "Picked point must approach the moved target")
+            position = stage.state_0.body_q.numpy()[body][:3]
+            self.assertGreater(float(position[0]) * math.copysign(1.0, target_x), 0.25)
+        # Release while the spring is accelerating, not after it has settled.
+        moved_origin = carb.Float3(1.0 / meters_per_unit, -3.0 / meters_per_unit, 1.0 / meters_per_unit)
+        interaction.handle_raycast(moved_origin, direction, True)
+        for _ in range(3):
+            stage.step_sim(1.0 / 60.0)
+        self.assertGreater(float(stage.state_0.body_qd.numpy()[body][0]), 0.01)
+        interaction.handle_raycast(moved_origin, direction, False)
+        self.assertFalse(stage.picking.is_picking())
+        self._check_released_motion(stage, body)
+        if use_cuda_graph:
+            self.assertIs(stage.graph, captured_graph, "Picking must update the captured graph's live inputs")
+
+    async def test_drag_uncaptured_one_substep(self) -> None:
+        """Move and release a cube without CUDA capture."""
+        await self._check_drag(1, False, 1.0)
+
+    async def test_drag_captured_one_substep(self) -> None:
+        """Pick, move, and release after the physics graph has been captured."""
+        await self._check_drag(1, True, 1.0)
+
+    # The extension currently supports meter-authored stages; other units emit an importer diagnostic.
+    async def test_drag_uncaptured_three_substeps(self) -> None:
+        """Apply drag forces at every uncaptured substep."""
+        await self._check_drag(3, False, 1.0)
+
+    async def test_drag_captured_four_substeps(self) -> None:
+        """Update captured drag forces across multiple substeps."""
+        await self._check_drag(4, True, 1.0)
+
+    async def test_pause_and_reset_release_drag(self) -> None:
+        """Release a held cube through both adapter and timeline lifecycle callbacks."""
+        stage, callbacks, body = await self._play_cube(3, False, 1.0)
+        interaction = callbacks
+        for event in ("adapter_pause", "timeline_pause", "adapter_reset", "timeline_stop"):
+            with self.subTest(event=event):
+                position = stage.state_0.body_q.numpy()[body][:3]
+                origin = carb.Float3(float(position[0]), float(position[1]) - 3.0, float(position[2]))
+                direction = carb.Float3(0.0, 1.0, 0.0)
+                interaction.handle_raycast(origin, direction, True)
+                self.assertTrue(stage.picking.is_picking())
+                moved_origin = carb.Float3(origin[0] + 0.5, origin[1], origin[2])
+                interaction.handle_raycast(moved_origin, direction, True)
+                # Keep the model alive on reset so a stale pick cannot hide behind reinitialization.
+                with patch.object(carb_config, "reset_on_stop", return_value=False):
+                    if event == "adapter_pause":
+                        self.assertTrue(callbacks.on_pause())
+                    elif event == "adapter_reset":
+                        self.assertTrue(callbacks.on_reset())
+                    else:
+                        event_type = (
+                            omni.timeline.TimelineEventType.PAUSE
+                            if event == "timeline_pause"
+                            else omni.timeline.TimelineEventType.STOP
+                        )
+                        stage.on_timeline_event(SimpleNamespace(type=int(event_type)))
+                self.assertFalse(stage.picking.is_picking())
+                self.assertFalse(stage.playing)
+                self.assertFalse(callbacks.handle_raycast(origin, direction, True))
+                self.assertFalse(stage.picking.is_picking(), "Paused interaction must not restart a drag")
+                self.assertTrue(callbacks.on_resume(0.0))
+                self._check_released_motion(stage, body)

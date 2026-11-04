@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+### Added
+- Support viewport Shift+drag through Newton Picking with bounded forces, including CUDA graph replay and physics substeps.
+
 ## [1.1.1] - 2026-10-02
 ### Changed
 - `NewtonStage.state_temp` is no longer allocated and stays `None`.

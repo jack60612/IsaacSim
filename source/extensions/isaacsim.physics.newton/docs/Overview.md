@@ -16,6 +16,20 @@ The core physics control is accessed through {func}`acquire_physics_interface <i
 
 The {func}`acquire_stage <isaacsim.physics.newton.acquire_stage>` function provides access to the NewtonStage object, which handles the simulation stage and USD integration. This stage object manages the physics scene representation and coordinates with the broader Isaac Sim USD workflow.
 
+### Viewport Interaction
+
+**Shift+left-drag applies bounded Newton Picking forces** to a body under the viewport ray while simulation is playing
+with Newton active. Either Shift key starts the gesture; ordinary viewport input remains unchanged outside the gesture.
+The viewport forwards world-space rays directly to `NewtonStage.handle_raycast`, which converts USD world coordinates
+to Newton meters and updates the drag target. This avoids native raycast callback bindings that discard vector components.
+Picking forces are applied before every solver substep, including CUDA graph replay. Releasing the mouse, pausing,
+stopping, closing the viewport, switching backends, detaching, or reinitializing the stage releases the picked body.
+Mouse release still ends the drag if Shift was released first.
+The adapter requires the public `newton.viewer.Picking` API and its `apply_force(state)` method from Newton
+upstream revision `7f0c13af6e4dd75253709c31dc65c0edcaf22b44` or a compatible release. NVIDIA must integrate
+that dependency release separately from this source-only change; the older bundled Newton is insufficient.
+Viewport interaction is enabled when viewport windows are available and does not require a viewport in headless applications.
+
 ### Configuration System
 
 **{class}`NewtonConfig <isaacsim.physics.newton.NewtonConfig>`** serves as the primary configuration class, following IsaacLab's pattern of separating simulation-level parameters from solver-specific settings. Key configuration areas include:
