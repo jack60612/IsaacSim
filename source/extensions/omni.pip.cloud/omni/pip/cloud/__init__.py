@@ -20,12 +20,9 @@ import omni.ext
 
 class Extension(omni.ext.IExt):
     def on_startup(self, ext_id: Any) -> Any:
-        # Force reload of newer typing extensions provided by this extensions prebundle
-        from importlib import reload
-
-        import typing_extensions
-
-        reload(typing_extensions)
+        # Dependencies are selected by the package environment. Reloading a live
+        # typing_extensions module invalidates aliases held by other extensions.
+        pass
 
     def on_shutdown(self) -> Any:
         pass

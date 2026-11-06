@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.5.8] - 2026-11-06
+### Fixed
+- Preserve imported typing aliases and lazy Pydantic schemas by avoiding live `typing_extensions` reload on startup.
+
 ## [1.5.7] - 2026-09-16
 ### Removed
 - Remove unused aioboto3 dependency.

@@ -23,6 +23,23 @@ import omni.kit.test
 class TestPipArchive(omni.kit.test.AsyncTestCase):
     """TestPipArchive implementation."""
 
+    async def test_startup_preserves_typing_aliases_and_lazy_pydantic_schemas(self) -> None:
+        """Startup must not invalidate aliases already imported by another extension."""
+        import typing_extensions
+        from omni.pip.cloud import Extension
+        from pydantic import JsonValue, TypeAdapter
+
+        alias_type = typing_extensions.TypeAliasType
+        self.assertIsInstance(JsonValue, alias_type)
+        Extension().on_startup("omni.pip.cloud")
+        self.assertIs(typing_extensions.TypeAliasType, alias_type)
+        self.assertIsInstance(JsonValue, typing_extensions.TypeAliasType)
+        # Build only after startup, as lazily imported downstream models do.
+        adapter = TypeAdapter(JsonValue)
+        payload = {"nested": [None, True, 1, 2.5, "value", {"leaf": "ok"}]}
+        self.assertEqual(adapter.validate_python(payload), payload)
+        self.assertEqual(adapter.validate_json(adapter.dump_json(payload)), payload)
+
     # import all packages to make sure dependencies were not missed
     async def test_import_all(self) -> None:
         """Verify import all."""
